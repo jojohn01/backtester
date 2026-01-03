@@ -32,8 +32,16 @@ class DataSpec(BaseModel):
     timeframe: str | None = None
     start: datetime 
     end: datetime | None = None
+    
     proxy: DataSpec | None = None
     proxy_tag: bool | None = None
+    
+    calendar: str | None = "NYSE"
+    use_rth: bool = False
+
+    rth_pad_open: int = 0
+    rth_pad_close: int = 0
+
 
     class Config:
         frozen = True

@@ -4,12 +4,54 @@ from datetime import datetime, timedelta, timezone
 from dataspec import DataSpec
 from fetcher import DataFetcher
 from typing import cast
+import exchange_calendars as xcals
 
 
 class DataRepository:
     def __init__(self, root_dir: str = "./data"):
         self.root = Path(root_dir)
         self.fetcher = DataFetcher()
+        self._calendars = {}
+
+    def _get_calendar(self, name: str):
+        if name not in self._calendars:
+            self._calendars[name] = xcals.get_calendar(name)
+        return self._calendars[name]
+
+    def _filter_calendar_rth(self, df: pd.DataFrame, spec: DataSpec) -> pd.DataFrame:
+        if df.empty: return df
+
+        cal = self._get_calendar(spec.calendar if spec.calendar else "XNYS")
+
+        start_date = df.index.min()
+        end_date = df.index.max()
+
+        schedule = cal.schedule[start_date.replace(tzinfo=None): end_date.replace(tzinfo=None)]
+        if schedule.empty:
+            return pd.DataFrame()
+
+        opens = schedule['open'].dt.tz_convert(timezone.utc) - pd.Timedelta(minutes=spec.rth_pad_open)
+        closes = schedule['close'].dt.tz_convert(timezone.utc) + pd.Timedelta(minutes=spec.rth_pad_close)
+
+        slices = []
+
+        for i in range(len(schedule)):
+            t_open = opens.iloc[i]
+            t_close = closes.iloc[i]
+
+
+            if t_close < df.index[0] or t_open > df.index[-1]:
+                continue
+
+            day_slice = df.loc[(df.index >= t_open) & (df.index < t_close)]
+
+            if not day_slice.empty:
+                slices.append(day_slice)
+        if not slices:
+            return pd.DataFrame()
+        
+        return pd.concat(slices).sort_index()
+
 
     def load_data(self, spec: DataSpec) -> pd.DataFrame:
         """
@@ -24,48 +66,45 @@ class DataRepository:
 
         asset_folder = (
             self.root / target_spec.source.value / 
-            target_spec.asset_type.value / target_spec.data_type /
-            target_spec.symbol / target_spec.currency
+            target_spec.asset_type.value / target_spec.data_type.value /
+            target_spec.symbol / target_spec.currency / (target_spec.timeframe if target_spec.timeframe else '1m')
         )
 
         asset_folder.mkdir(parents= True, exist_ok= True)
         
-        expanded_start = self._floor_date(spec.start)
+        buffer = timedelta(minutes=max(spec.rth_pad_open, spec.rth_pad_close, 60))
 
+
+        load_start = self._floor_date(spec.start - buffer)
         if spec.end:
-            expanded_end = self._ciel_date(spec.end)
+            load_end = self._ciel_date(spec.end + buffer)
         else:
-            expanded_end = datetime.now(timezone.utc)
-
-        stored_intervals = self._scan_stored_intervals(asset_folder, spec)
-
-        gaps = self._find_gaps(expanded_start, expanded_end, stored_intervals)
+            load_end = datetime.now(timezone.utc)
+        
+        load_spec = target_spec.model_copy(update={'start': load_start, 'end': load_end})
+        stored_intervals = self._scan_stored_intervals(asset_folder, load_spec)
+        gaps = self._find_gaps(load_start, load_end, stored_intervals)
 
         for gap_start, gap_end in gaps:
-            print(f"Gap detected: {gap_start} to {gap_end}. Fetching...")
-
-            gap_spec = spec.model_copy(update={'start': gap_start, 'end': gap_end})
-
-            new_data = self.fetcher.fetch(gap_spec)
-
+            fetch_spec = target_spec.model_copy(update={'start': gap_start, 'end': gap_end})
+            new_data = self.fetcher.fetch(fetch_spec)
             if new_data is not None and not new_data.empty:
                 self._save_partitioned(new_data, asset_folder)
-            else:
-                print(f"Warning: No data returned for gap {gap_start}-{gap_end}")
 
-        full_df = self._load_from_folder(asset_folder, expanded_start, expanded_end)
+        full_df = self._load_from_folder(asset_folder, load_start, load_end)
+        if full_df.empty: return pd.DataFrame()
 
-        if full_df.empty:
-            return pd.DataFrame()
-        
+        full_df = self._fill_gaps(full_df, spec.timeframe)
+
+        if spec.use_rth:
+            full_df = self._filter_calendar_rth(full_df, spec)
 
         mask = (full_df.index >= spec.start)
         if spec.end:
             mask &= (full_df.index < spec.end)
 
-        final_df = full_df.loc[mask].copy()
+        return full_df.loc[mask].copy()
 
-        return self._fill_gaps(final_df, spec.timeframe if spec.timeframe else "")
 
 
 
@@ -73,7 +112,7 @@ class DataRepository:
         
         intervals = []
 
-        freq_map = {'1m': '1min', '5m': '5min', '1h': '1h', '1d': '1D'}
+        freq_map = {'1m': '1min', '3m': '3min', '5m': '5min', '10m': '10min', '15m': '15min', '30m': '30min', '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h', '1d': '1D', '3d': '3D', '1w': '1W'}
         freq = freq_map.get(spec.timeframe, '1min') if spec.timeframe else '1min'
         gap_threshold = pd.Timedelta(freq) * 1.5
         start_year = spec.start.year
@@ -209,9 +248,10 @@ class DataRepository:
                 traceback.print_exc()
                 return pd.DataFrame()
 
-    def _fill_gaps(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    def _fill_gaps(self, df: pd.DataFrame, timeframe: str | None) -> pd.DataFrame:
         if df.empty: return df
-        freq_map = {'1m': '1min', '5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h', '1d': '1D'}        
+        freq_map = {'1m': '1min', '3m': '3min', '5m': '5min', '10m': '10min', '15m': '15min', '30m': '30min', '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h', '1d': '1D', '3d': '3D', '1w': '1W'}     
+        timeframe = '1m' if timeframe is None else timeframe
         freq = freq_map.get(timeframe, '1min')
 
         idx = cast(pd.DatetimeIndex, df.index)

@@ -1,89 +1,115 @@
-import pandas as pd
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import shutil
-
-# Adjust these imports to match your actual filenames
+import pandas as pd
+from pathlib import Path
+from datetime import datetime, timezone
 from datarepo import DataRepository
-from dataspec import DataSpec, DataType, AssetType, Source
+# Adjust this import based on where your DataSpec class is located
+from dataspec import DataSpec, Source, AssetType, DataType
+from typing import cast
 
-def test_pipeline():
-    # 1. SETUP: Define a test range (e.g., first 3 days of 2024)
-    # Using a past date ensures the data is definitely immutable/complete.
-    start_date = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    end_date = datetime(2024, 1, 4, tzinfo=timezone.utc)
+# --- SETUP ---
+TEST_DIR = Path("data_test")
+# Clean start
+if TEST_DIR.exists(): shutil.rmtree(TEST_DIR)
 
-    print(f"--- TEST START: Requesting BTC/USDT from {start_date.date()} to {end_date.date()} ---")
+repo = DataRepository(root_dir=str(TEST_DIR))
 
-    # 2. INITIALIZE REPO
-    # We use a temporary test folder so we don't mess up your real data library yet
-    repo = DataRepository(root_dir="./data_test")
-    
-    spec = DataSpec(
-        symbol="BTC",
-        source=Source.BINANCE,
-        asset_type=AssetType.CRYPTO,
-        data_type=DataType.BARS,
-        currency="USDT",
-        timeframe="1m",
-        start=start_date,
-        end=end_date
-    )
+# 1. DEFINE PROXY (The Real Data Source)
+# This is the "Raw" data we will actually fetch (Binance BTC)
+btc_spec = DataSpec(
+    symbol="BTC",
+    currency="USDT",
+    source=Source.BINANCE,
+    asset_type=AssetType.CRYPTO,
+    data_type=DataType.BARS,
+    timeframe="1m",
+    start=datetime(2024, 1, 1, tzinfo=timezone.utc) # Placeholder start
+)
 
-    # 3. FIRST RUN (The "Cold" Start)
-    # This should trigger a DOWNLOAD from Binance and SAVE to disk.
-    print("\n[1] Running Cold Load (Should Fetch)...")
-    t0 = datetime.now()
-    df = repo.load_data(spec)
-    t1 = datetime.now()
+# 2. DEFINE STRATEGY ASSET (The Wrapper)
+# We pretend this is "SPY" stock data, but we force it to read the BTC proxy.
+# We also apply strict NYSE Trading Hours + 30min pre-market padding.
+spy_spec = DataSpec(
+    symbol="FAKE_SPY", 
+    currency="USD",
+    source=Source.BINANCE, # This gets ignored because proxy is active
+    asset_type=AssetType.EQUITY,
+    data_type=DataType.BARS,
+    timeframe="1m",
     
-    print(f"    - Rows Loaded: {len(df)}")
-    print(f"    - Time Taken: {(t1-t0).total_seconds():.2f}s")
+    # Request Jan 3rd to Jan 5th
+    start=datetime(2024, 1, 3, tzinfo=timezone.utc),
+    end=datetime(2024, 1, 5, tzinfo=timezone.utc),
     
-    # Validation A: Did we get data?
-    if df.empty:
-        print("    [FAIL] DataFrame is empty!")
-        return
+    # --- PROXY CONFIG ---
+    proxy=btc_spec,
+    proxy_tag=True,   # We set this to True to enable the proxy logic
     
-    # Validation B: Is the file on disk?
-    expected_file = Path("./data_test/binance/crypto/bars/BTC/USDT/2024.parquet")
-    if expected_file.exists():
-        print(f"    [PASS] File created at: {expected_file}")
+    # --- RTH CONFIG ---
+    calendar="NYSE",       # Use NYSE calendar (9:30 - 16:00 ET)
+    use_rth=True,          # Turn on the filter
+    rth_pad_open=30,       # Start session 30 mins early (9:00 AM ET)
+    rth_pad_close=0        # Close exactly at 16:00 ET
+)
+
+print("\n--- TEST START: Proxy (BTC) -> Asset (SPY) + RTH + Padding ---")
+print(f"Requesting: {spy_spec.symbol} (using {btc_spec.symbol} data)")
+print(f"Window: {spy_spec.start} to {spy_spec.end}")
+print(f"RTH: NYSE (09:30-16:00) with 30m Open Padding (Start 09:00)")
+
+# --- EXECUTE ---
+try:
+    df = repo.load_data(spy_spec)
+except Exception as e:
+    print(f"\n[!!!] CRASH: {e}")
+    import traceback
+    traceback.print_exc()
+    df = pd.DataFrame()
+
+# --- VERIFY ---
+print(f"\n[RESULT] Rows Loaded: {len(df)}")
+
+if df.empty:
+    print("    [FAIL] No data returned.")
+else:
+    # 1. Verify File System (Did we save into the PROXY folder?)
+    # Path should be: data_test/binance/crypto/bars/BTC/USDT (Not FAKE_SPY)
+    expected_path = TEST_DIR / "binance" / "crypto" / "bars" / "BTC" / "USDT"
+    
+    if expected_path.exists() and any(expected_path.iterdir()):
+        print("    [PASS] Data correctly stored in PROXY folder (BTC/USDT).")
     else:
-        print(f"    [FAIL] File NOT found at: {expected_file}")
-        return
+        print(f"    [FAIL] Data not found in {expected_path}")
 
-    # Validation C: Are gaps filled?
-    # We check if there are any NaNs. If _fill_gaps worked, this should be 0.
-    nan_count = df.isnull().sum().sum()
-    if nan_count == 0:
-        print("    [PASS] No NaNs found (Gap filling worked).")
-    else:
-        print(f"    [FAIL] Found {nan_count} NaNs! Gap filling failed.")
-
-    # 4. SECOND RUN (The "Cached" Start)
-    # This should verify the SCANNER found the file and skipped the download.
-    print("\n[2] Running Hot Load (Should Read from Disk)...")
-    t0 = datetime.now()
-    df_cached = repo.load_data(spec)
-    t1 = datetime.now()
+    # 2. Verify RTH Filtering (Did we cut out the nights?)
+    # Convert index to Eastern Time to check hours easily
+    df_et = cast(pd.DatetimeIndex, df.index).tz_convert('US/Eastern')
     
-    print(f"    - Rows Loaded: {len(df_cached)}")
-    print(f"    - Time Taken: {(t1-t0).total_seconds():.2f}s")
+    earliest_time = df_et.time.min()
+    latest_time = df_et.time.max()
+    
+    print(f"    - Earliest Bar (ET): {earliest_time}")
+    print(f"    - Latest Bar (ET):   {latest_time}")
 
-    # Validation D: Speed Check
-    # Hot load should be significantly faster than cold load
-    print("    [PASS] Hot load completed.")
+    # Check Start Time (Should be 09:00:00 because of 30m padding)
+    if earliest_time.hour == 9 and earliest_time.minute == 0:
+        print("    [PASS] RTH Start correct (09:00 ET).")
+    elif earliest_time.hour == 9 and earliest_time.minute == 30:
+        print("    [FAIL] Padding ignored (Started at 09:30 ET).")
+    else:
+        print(f"    [WARN] Unexpected start time: {earliest_time}")
 
-    # 5. DATA INTEGRITY CHECK
-    print("\n[3] Inspecting Data Head/Tail...")
-    print(df_cached.head(2))
-    print("...")
-    print(df_cached.tail(2))
+    # Check for Overnight Data (Should be zero)
+    # Valid hours are 09, 10, 11, 12, 13, 14, 15
+    # 16:00 is usually excluded by strict slicing, but might appear depending on closure.
+    overnight_mask = (df_et.hour < 9) | (df_et.hour >= 17)
+    overnight_rows = df_et[overnight_mask]
+    
+    if overnight_rows.empty:
+        print("    [PASS] No overnight data found (RTH filter worked).")
+    else:
+        print(f"    [FAIL] Found {len(overnight_rows)} rows outside RTH!")
 
-    # Optional: Clean up test data
-    shutil.rmtree("./data_test")
-    print("\n[CLEANUP] Test folder removed.")
-
-if __name__ == "__main__":
-    test_pipeline()
+# --- CLEANUP ---
+# Uncomment to keep data for inspection
+if TEST_DIR.exists(): shutil.rmtree(TEST_DIR)
