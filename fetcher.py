@@ -80,6 +80,8 @@ def fetch_ohlcv_range(exchange, spec: DataSpec) -> pd.DataFrame:
 
     df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    df['symbol'] = spec.symbol
+    df['symbol'] = df['symbol'].astype('category')
     df.set_index('timestamp', inplace=True)
     
     # Final filter to ensure we respect the exact end_time
