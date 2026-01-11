@@ -61,3 +61,12 @@ class Trade:
     commission: float
     time: datetime
     pnl: float = 0.0
+
+@dataclass
+class AssetVars:
+    symbol: str
+    position_qty: float = 0.0
+    avg_entry_price: float = 0.0
+    last_price: float = 0.0
+    market_fee_bps: float = 0.0
+    limit_fee_bps: float = 0.0

@@ -109,58 +109,78 @@ class DataRepository:
 
 
     def _scan_stored_intervals(self, folder: Path, spec: DataSpec) -> list[tuple[datetime, datetime]]:
-        
-        intervals = []
-
-        freq_map = {'1m': '1min', '3m': '3min', '5m': '5min', '10m': '10min', '15m': '15min', '30m': '30min', '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h', '1d': '1D', '3d': '3D', '1w': '1W'}
-        freq = freq_map.get(spec.timeframe, '1min') if spec.timeframe else '1min'
-        gap_threshold = pd.Timedelta(freq) * 1.5
-        start_year = spec.start.year
-        end_year = spec.end.year if spec.end else datetime.now().year
-
-        for file_path in sorted(folder.glob("*.parquet")):
-            try:
-                file_year = int(file_path.stem)
-                if file_year < start_year or file_year > end_year:
-                    continue
-            except ValueError:
-                pass
-
-            try:
-                filters = [("timestamp", ">=", spec.start)]
-                
-                df = pd.read_parquet(
-                    file_path, 
-                    columns=['timestamp'], 
-                    engine='pyarrow',
-                    filters=filters
-                )
-                if df.index.empty:
-                    continue
             
-                if 'timestamp' in df.columns:
-                    timestamps = df['timestamp']
+            intervals = []
+
+            freq_map = {'1m': '1min', '3m': '3min', '5m': '5min', '10m': '10min', '15m': '15min', '30m': '30min', '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h', '1d': '1D', '3d': '3D', '1w': '1W'}
+            freq = freq_map.get(spec.timeframe, '1min') if spec.timeframe else '1min'
+            gap_threshold = pd.Timedelta(freq) * 1.5
+            start_year = spec.start.year
+            end_year = spec.end.year if spec.end else datetime.now().year
+
+            # 1. Collect raw intervals from files
+            for file_path in sorted(folder.glob("*.parquet")):
+                try:
+                    file_year = int(file_path.stem)
+                    if file_year < start_year or file_year > end_year:
+                        continue
+                except ValueError:
+                    pass
+
+                try:
+                    filters = [("timestamp", ">=", spec.start)]
+                    
+                    df = pd.read_parquet(
+                        file_path, 
+                        columns=['timestamp'], 
+                        engine='pyarrow',
+                        filters=filters
+                    )
+                    if df.index.empty:
+                        continue
+                
+                    if 'timestamp' in df.columns:
+                        timestamps = df['timestamp']
+                    else:
+                        timestamps = df.index.to_series()
+
+                    diffs = timestamps.sort_values().diff()
+
+                    gap_mask = diffs > gap_threshold
+                    if not gap_mask.any():
+                        intervals.append((timestamps.min(), timestamps.max()))
+                    else:
+                        chunk_ids = gap_mask.cumsum()
+
+                        for _, chunk in timestamps.groupby(chunk_ids):
+                            intervals.append((chunk.min(), chunk.max()))
+
+                except Exception as e:
+                    print(f"[!] Error scanning file {file_path}: {e}")
+                    continue
+
+            # 2. MERGE ADJACENT INTERVALS (The Fix)
+            if not intervals:
+                return []
+
+            # Sort by start time
+            intervals.sort(key=lambda x: x[0])
+            
+            merged = []
+            curr_start, curr_end = intervals[0]
+
+            for next_start, next_end in intervals[1:]:
+                # If the next chunk starts within the threshold of the current chunk's end
+                # (e.g. 23:45 + 15m threshold >= 00:00), we merge them.
+                if next_start <= curr_end + gap_threshold:
+                    curr_end = max(curr_end, next_end)
                 else:
-                    timestamps = df.index.to_series()
-
-                diffs = timestamps.sort_values().diff()
-
-                gap_mask = diffs > gap_threshold
-                if not gap_mask.any():
-                    intervals.append((timestamps.min(), timestamps.max()))
-                else:
-                    chunk_ids = gap_mask.cumsum()
-
-                    for _, chunk in timestamps.groupby(chunk_ids):
-                        intervals.append((chunk.min(), chunk.max()))
-
-            except Exception as e:
-                print(f"[!] Error scanning file {file_path}: {e}")
-                continue
-
-
-        
-        return sorted(intervals, key=lambda x: x[0])
+                    merged.append((curr_start, curr_end))
+                    curr_start, curr_end = next_start, next_end
+            
+            merged.append((curr_start, curr_end))
+            
+            return merged
 
     def _find_gaps(self, req_start: datetime, req_end: datetime, existing_intervals: list) -> list[tuple]:
         gaps = []

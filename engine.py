@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from models import Side, Status, Trade, Order, OrderType, AssetVars
-from strategy import Strategy
+from deprecated.strategy import Strategy
 from typing import List, Optional, Dict, cast
 import uuid
 
