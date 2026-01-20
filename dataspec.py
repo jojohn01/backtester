@@ -37,10 +37,10 @@ class DataSpec(BaseModel):
     proxy_tag: bool | None = None
     
     calendar: str | None = "NYSE"
-    use_rth: bool = False
+    use_rth: bool = False # Not as useful as you would think
 
-    rth_pad_open: int = 0
-    rth_pad_close: int = 0
+    rth_pad_open: int = 0 #depreciated
+    rth_pad_close: int = 0 #deprecieted
 
 
     class Config:
@@ -55,7 +55,7 @@ class DataSpec(BaseModel):
             raise ValueError(f"Start date ({self.start}) must be before end date ({self.end})")
         
         # 2. Ensure start is not in the future
-        if self.start > datetime.now(timezone.utc):
+        if self.start > datetime.now():
              raise ValueError("Start date cannot be in the future")
              
         return self

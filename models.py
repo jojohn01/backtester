@@ -31,11 +31,20 @@ class Order:
     symbol: str
     side: Side
     order_type: OrderType
-    qty: float
+    qty: float = 0.0
+    cash_amount: float = 0.0
     price: Optional[float] = None
     tags: Dict[str, str] = field(default_factory=dict)
 
     stop_price: Optional[float] = None
+    limit_price: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    limit_pct: Optional[float] = None
+    stop_qty: Optional[float] = None
+    limit_qty: Optional[float] = None
+
+    revenge: float = 0.0
+
     parent_id: Optional[str] = None
     group_id: Optional[str] = None
 
@@ -47,7 +56,28 @@ class Order:
     status: Status = Status.PENDING
     created_at: Optional[datetime] = None
     filled_at: Optional[datetime] = None
-    fill_price: float = 0.0    
+    fill_price: float = 0.0
+
+    def __post_init__(self):
+        if self.order_type in [OrderType.LIMIT, OrderType.STOP_LIMIT] and self.price is None:
+            raise ValueError(f"Limit Orders must have a price. Symbol: {self.symbol}")
+                    
+        if self.order_type in [OrderType.STOP, OrderType.STOP_LIMIT] and self.price is None:
+            raise ValueError(f"Stop Orders must have a price. Symbol: {self.symbol}")
+        
+        if self.qty <= 0 and self.cash_amount <= 0:
+            raise ValueError(f"Order must have positive qty OR cash_amount. Symbol: {self.symbol}")
+        
+        if self.qty > 0 and self.cash_amount > 0:
+            raise ValueError("Ambiguous Order: Cannot specify both qty and cash_amount.")
+        
+        if self.stop_loss_pct and self.stop_price:
+            raise ValueError(f"Cannot specify both stop_loss_pct and stop_price.")
+        
+        if self.limit_pct and self.limit_price:
+            raise ValueError(f"Cannot specify both limit_pct and limit_price.")
+         
+
 
 
 @dataclass

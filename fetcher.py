@@ -86,7 +86,7 @@ def fetch_ohlcv_range(exchange, spec: DataSpec) -> pd.DataFrame:
     
     # Final filter to ensure we respect the exact end_time
     if end_time:
-         df = df[df.index <= end_time]
+         df = df[df.index <= pd.to_datetime(end_time, utc=True)]
 
     return df
 

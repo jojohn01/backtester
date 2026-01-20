@@ -99,9 +99,18 @@ class DataRepository:
         if spec.use_rth:
             full_df = self._filter_calendar_rth(full_df, spec)
 
-        mask = (full_df.index >= spec.start)
+
+        s_start = pd.Timestamp(spec.start)
+        if s_start.tzinfo is None:
+            s_start = s_start.tz_localize(timezone.utc)
+            
+        s_end = pd.Timestamp(spec.end) if spec.end else None
+        if s_end and s_end.tzinfo is None:
+            s_end = s_end.tz_localize(timezone.utc)
+
+        mask = (full_df.index >= s_start)
         if spec.end:
-            mask &= (full_df.index < spec.end)
+            mask &= (full_df.index < s_end)
 
         return full_df.loc[mask].copy()
 
@@ -128,7 +137,14 @@ class DataRepository:
                     pass
 
                 try:
-                    filters = [("timestamp", ">=", spec.start)]
+                    pa_start = pd.Timestamp(spec.start)
+                    if pa_start.tzinfo is None:
+                        pa_start = pa_start.tz_localize('UTC')
+                    else:
+                        pa_start = pa_start.tz_convert('UTC')
+                    pa_start = pa_start.floor('ns')
+
+                    filters = [("timestamp", ">=", pa_start)]
                     
                     df = pd.read_parquet(
                         file_path, 
@@ -250,14 +266,29 @@ class DataRepository:
             if not files:
                 print("    [DEBUG] No parquet files found.")
                 return pd.DataFrame()
+            
+            pa_start = pd.Timestamp(start)
+            pa_end = pd.Timestamp(end)
+            if pa_start.tzinfo is None:
+                pa_start = pa_start.tz_localize('UTC')
+            else:
+                pa_start = pa_start.tz_convert('UTC')
+
+            pa_start = pa_start.floor('ns')
+
+            if pa_end.tzinfo is None:
+                pa_end = pa_end.tz_localize('UTC')
+            else:
+                pa_end = pa_end.tz_convert('UTC')
+            pa_end = pa_end.floor('ns')
 
             try:
                 return pd.read_parquet(
                     folder, 
                     engine='pyarrow',
                     filters=[
-                        ('timestamp', '>=', start),
-                        ('timestamp', '<', end)
+                        ('timestamp', '>=', pa_start),
+                        ('timestamp', '<', pa_end)
                     ]
                 )
 
@@ -291,7 +322,14 @@ class DataRepository:
 
 
     def _floor_date(self, dt: datetime) -> datetime:
+        # If it has no timezone, assume it's UTC, then floor it to midnight
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
     def _ciel_date(self, dt: datetime) -> datetime:
+        # If it has no timezone, assume it's UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # Move to the next day at midnight
         return (dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
