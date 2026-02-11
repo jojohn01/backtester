@@ -20,7 +20,12 @@ class ExecutionEngine:
         self.open_orders: List[Order] = []
         self.fill_history: List[Trade] = []
         self.equity_curve = []
+        self.strategy = None
+        self.muted = False
 
+
+    def register_strategy(self, strategy):
+        self.strategy = strategy
 
     def submit_order(self, orders: List[Order], current_time: pd.Timestamp):
 
@@ -28,6 +33,7 @@ class ExecutionEngine:
             order.created_at = current_time
             order.status = Status.PENDING
             self.open_orders.append(order)
+            self.muted = False
     
     def cancel_all_orders(self):
         for order in self.open_orders:
@@ -36,7 +42,10 @@ class ExecutionEngine:
     
     def run(self, data: pd.DataFrame, strategy: 'Strategy'):
 
-        print(f"--- Engine Starting Replay: {len(data)} bars ---")
+        if not self.muted:
+            print(f"--- Engine Starting Replay: {len(data)} bars ---")
+
+        self.strategy = strategy
 
         for timestamp, row in data.iterrows():
 
@@ -294,12 +303,14 @@ class ExecutionEngine:
                 order_type=OrderType.STOP,
                 price=sl_price,
                 qty=order.stop_qty or (order.qty * (1 + order.revenge)),
-                group_id=order.group_id or order.id
+                stop_loss_pct= order.revenge_stop,
+                group_id=(order.group_id or order.id) if not order.revenge_stop else None
             )
 
             stop_order.status = Status.PENDING
             stop_order.created_at = time
             self.open_orders.append(stop_order)
+            self.strategy.tracked_orders.append(stop_order)
         
         if order.limit_price or order.limit_pct:
             limit_side = Side.SHORT if order.side == Side.LONG else Side.LONG
@@ -325,6 +336,7 @@ class ExecutionEngine:
             limit_order.status = Status.PENDING
             limit_order.created_at = time
             self.open_orders.append(limit_order)
+            self.strategy.tracked_orders.append(limit_order)
                 
 
     def _cancel_group(self, group_id: str):

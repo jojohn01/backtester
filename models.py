@@ -44,6 +44,7 @@ class Order:
     limit_qty: Optional[float] = None
 
     revenge: float = 0.0
+    revenge_stop: float = 0.0
 
     parent_id: Optional[str] = None
     group_id: Optional[str] = None
